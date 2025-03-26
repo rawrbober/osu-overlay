@@ -2,16 +2,16 @@ import tkinter as tk
 import tkinter.font as tkFont
 from pynput.mouse import Listener as MouseListener
 import keyboard
-import requests
 import win32con
 import win32gui
 import win32api
-import pyperclip
-import os
 from scan_for_start import scan_for_start
+import time
+import os
+
 
 class OsuOverlay:
-    def __init__(self, modstring):
+    def __init__(self, mapdata, modstring):
         # These are the in-game mods
         self.DT = False
         self.HR = False
@@ -21,7 +21,7 @@ class OsuOverlay:
         self.FL = False
         # Selected mods list from get_ID_and_mods
         self.modstring = modstring
-
+        self.mapdata = mapdata
         # Don't touch these, core overlay components
         self.mouse_x, self.mouse_y = 0, 0
         self.circle_objects = {}
@@ -31,11 +31,12 @@ class OsuOverlay:
         self.listener = None
         self.is_closing = False
         self.scheduled_tasks = []
-        
         # Both of these will be changed based on map values automatically
         self.circle_removal_delay = 400
         self.circle_size = 4
         self.sliderfill = 'gray18'
+        self.draw_approach = True
+
 
 # Make a semi-transparent click-through window.
     def set_click_through(self, hwnd):
@@ -48,24 +49,29 @@ class OsuOverlay:
         else:
             win32gui.SetLayeredWindowAttributes(hwnd, win32api.RGB(99, 99, 99), 60, win32con.LWA_ALPHA)
 
+
 # So that it doesn't minimize when osu is interacted with
     def keep_on_top(self):
         self.root.lift()
         self.root.attributes('-topmost', True)
         self.scheduled_tasks.append(self.root.after(100, self.keep_on_top))
 
+
     def cancel_scheduled_tasks(self):
         while self.scheduled_tasks:
             task_id = self.scheduled_tasks.pop()
             self.root.after_cancel(task_id)
 
+
     def mouse_move(self, x, y):
         self.mouse_x, self.mouse_y = x, y
+
 
     def remove_circle(self, circle_id):
         if self.canvas:
             self.canvas.delete(circle_id)
             self.circle_objects.pop(circle_id, None)
+
 
     def draw_circle(self, x, y, object_type, sliderend):
         if self.canvas:
@@ -89,7 +95,11 @@ class OsuOverlay:
                     adjusted_slider_points = [(int(point[0]) * 2.25 + 384, 1116 - (int(point[1]) * 2.25 + 126)) for point in sliderend]
                 else:
                     adjusted_slider_points = [(int(point[0]) * 2.25 + 384, int(point[1]) * 2.25 + 126) for point in sliderend]
-                points_to_draw = [(x, y)] + adjusted_slider_points if len(adjusted_slider_points) > 1 else [(x, y), adjusted_slider_points[0]] if adjusted_slider_points else []
+                points_to_draw = (
+                    [(x, y)] + adjusted_slider_points
+                    if len(adjusted_slider_points) > 1
+                    else [(x, y), adjusted_slider_points[0]] if adjusted_slider_points else []
+                )
 
                 for i in range(len(points_to_draw) - 1):
                     x1, y1 = points_to_draw[i]
@@ -97,13 +107,60 @@ class OsuOverlay:
                     draw_rectangle_between_circles(x1, y1, x2, y2)
 
                 for point in adjusted_slider_points:
-                    drawn_slider_end = self.canvas.create_oval(point[0] - self.circle_size, point[1] - self.circle_size, point[0] + self.circle_size, point[1] + self.circle_size, fill=self.sliderfill, outline=self.sliderfill)
+                    drawn_slider_end = self.canvas.create_oval(
+                        point[0] - self.circle_size,
+                        point[1] - self.circle_size,
+                        point[0] + self.circle_size,
+                        point[1] + self.circle_size,
+                        fill=self.sliderfill,
+                        outline=self.sliderfill
+                    )
                     self.circle_objects[drawn_slider_end] = {'x': point[0], 'y': point[1]}
-                    self.scheduled_tasks.append(self.root.after(self.circle_removal_delay, lambda drawn_slider_end=drawn_slider_end: self.remove_circle(drawn_slider_end)))
+                    self.scheduled_tasks.append(
+                        self.root.after(self.circle_removal_delay, lambda drawn_slider_end=drawn_slider_end: self.remove_circle(drawn_slider_end))
+                    )
 
-        circle_id = self.canvas.create_oval(x - self.circle_size, y - self.circle_size, x + self.circle_size, y + self.circle_size, fill=fill_color)
-        self.circle_objects[circle_id] = {'x': x, 'y': y}
-        self.scheduled_tasks.append(self.root.after(self.circle_removal_delay, lambda: self.remove_circle(circle_id)))
+            # Draw the approach circle animation.
+            # Set the initial approach radius using a multiplier (adjust as needed).
+            if self.draw_approach:
+                approach_multiplier = 3.0
+                initial_approach_radius = self.circle_size * approach_multiplier
+
+                # Create the approach circle first so it lies behind the hit circle.
+                approach_circle_id = self.canvas.create_oval(
+                    x - initial_approach_radius,
+                    y - initial_approach_radius,
+                    x + initial_approach_radius,
+                    y + initial_approach_radius,
+                    outline='white',
+                    width=12
+                )
+                # Ensure the approach circle is deleted when its time is up.
+                self.scheduled_tasks.append(self.root.after(self.circle_removal_delay, lambda: self.canvas.delete(approach_circle_id)))
+                # Animate the approach circle shrinking.
+                start_time = time.time()
+                def update_approach_circle():
+                    elapsed = time.time() - start_time
+                    total_duration = self.circle_removal_delay / 1000.0  # convert ms to seconds
+                    progress = min(elapsed / total_duration, 1)
+                    # Linear interpolation: when progress=0, radius is initial; when progress=1, radius equals self.circle_size.
+                    new_radius = self.circle_size + (initial_approach_radius - self.circle_size) * (1 - progress)
+                    self.canvas.coords(approach_circle_id, x - new_radius, y - new_radius, x + new_radius, y + new_radius)
+                    if progress < 1:
+                        self.root.after(1, update_approach_circle)
+                update_approach_circle()
+
+            # Draw the hit circle on top of the approach circle.
+            circle_id = self.canvas.create_oval(
+                x - self.circle_size,
+                y - self.circle_size,
+                x + self.circle_size,
+                y + self.circle_size,
+                fill=fill_color
+            )
+            self.circle_objects[circle_id] = {'x': x, 'y': y}
+            self.scheduled_tasks.append(self.root.after(self.circle_removal_delay, lambda: self.remove_circle(circle_id)))
+
 
 # Checks for mouse collision in order to remove circles that have been hit
     def check_interaction(self):
@@ -114,14 +171,17 @@ class OsuOverlay:
                 self.remove_circle(circle_id)
             self.scheduled_tasks.append(self.root.after(10, self.check_interaction))
 
+
     def clear_screen(self):
         os.system('cls' if os.name == 'nt' else 'clear')
+
 
     def update_mods(self, mods_status):
         # Update the mods based on the dictionary provided
         for mod, status in mods_status.items():
             if hasattr(self, mod):
                 setattr(self, mod, status)
+
 
     def modstring_parse(self):
         mods = {"DT": False, "HR": False, "HD": False, "FL": False, "HT": False, "EZ": False}
@@ -154,6 +214,7 @@ class OsuOverlay:
 
         self.update_mods(mods)
 
+
     def draw_mods(self, x_offset=35, y_offset=200, size=40, color='white', duration=2500):
         if self.canvas:
             mods = ['DT', 'HR', 'EZ', 'HT', 'HD', 'FL']
@@ -171,9 +232,9 @@ class OsuOverlay:
             self.root.after(duration, lambda: self.canvas.delete(text_id))
         
 
-
     # Basic parser for beatmap stats
     def get_stats(self, text) -> int:
+        print("getting stats")
         # Separate into sections
         sections = text.split('\n\n')
         # Find the difficulty section
@@ -247,13 +308,11 @@ class OsuOverlay:
     # Parsing beatmap info into coords and delay and putting them into an array, gets displayed over time
     # Gets the approach rate from beatmap info, modifies existing delay to the new accurate one.
     def load_circle_info(self):
-        mapID = pyperclip.paste().split("beatmaps/")[1]
-        response = requests.get(f"https://osu.ppy.sh/osu/{mapID}").text
         # Set the removal timing to the map approach rate
-        self.circle_removal_delay = self.get_stats(response)
+        self.circle_removal_delay = self.get_stats(self.mapdata)
         circles_info = [
             self.extract_info(components)
-            for components in (line.split(',') for line in response.split("[HitObjects]")[1].split("\n")[1:-1])
+            for components in (line.split(',') for line in self.mapdata.split("[HitObjects]")[1].split("\n")[1:-1])
             if len(components) > 2
         ]
         if circles_info:
@@ -264,7 +323,7 @@ class OsuOverlay:
                 initial_delay += 450
                 self.circle_removal_delay = 450
             # If the map starts with a spinner the pixel scanning is delayed, this accounts for it
-            if int(str(response.split("[HitObjects]")[1].split("\n")[1:-1][0]).count(",")) == 6:
+            if int(str(self.mapdata.split("[HitObjects]")[1].split("\n")[1:-1][0]).count(",")) == 6:
                 initial_delay += 70
             # Adjust speed and HR circle inversion
             if self.DT and self.HR:
@@ -280,14 +339,17 @@ class OsuOverlay:
                 circles_info = [(x, y, delay - initial_delay, object_type, sliderend) for x, y, delay, object_type, sliderend in circles_info]
         return circles_info
 
+
     # When the user restarts the map by holding "`"
     def reset_game(self):
+        print("Resetting game")
         # Reset the canvas contents without closing the canvas
         self.cancel_scheduled_tasks()
         self.start_flag = False
         self.circle_objects.clear()
         if self.canvas:
             self.canvas.delete("all")
+
 
     # We're in-game, start drawing
     def start_sequence(self):
@@ -319,28 +381,21 @@ class OsuOverlay:
             self.is_closing = False
             self.start_flag = False
 
+
     def on_key_press(self, event):
+        print("started onkeypress")
         # Press enter to start the first hitobject scanning (this is also the hotkey to start a map in osu)
         # Automatic start. Will start at the wrong time if the user hovers over the initial position with their cursor in osu.
-        if event.name == 'enter' and not self.start_flag and self.root:
-            # Load circle data
-            self.circles_info = self.load_circle_info()
-            print("Scanning for first hitobject")
-            self.draw_mods()
-            # Scan for the first hitcircle to appear (pauses code until it appears)
-            scan_for_start(1, self.HR)
-            # Start the sequence once it's detected
-            self.start_flag = True
-            self.start_sequence()
-        elif event.name == '`' and self.root:
+        if event.name == '`' and self.root:
             # ` is the default hotkey to restart a map in osu, we reset the canvas and drawing timers
             self.reset_game()
             print("Resetting game")
+            time.sleep(0.5)
             # Sometimes the map doesn't fully fade to black on resets, added pixel range to correct that
             if self.EZ:
-                scan_for_start(9, self.HR)
+                scan_for_start(13, self.HR, self.mapdata)
             else:
-                scan_for_start(31, self.HR)
+                scan_for_start(60, self.HR, self.mapdata)
             print("Starting sequence")
             self.start_sequence()
         elif event.name == 'esc':
@@ -348,7 +403,8 @@ class OsuOverlay:
                 print("Closing canvas and waiting for reinitialization")
             self.close_canvas()
             self.clear_screen()
-            
+            keyboard.unhook_all()
+
 
     def initialize_script(self):
         # Initialize canvas
@@ -358,10 +414,8 @@ class OsuOverlay:
         self.canvas = tk.Canvas(self.root, bg='black', highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.root.update()
-
         # Parse mods
         self.modstring_parse()
-
         # Make the window seethrough and clickthrough (overlay)
         self.set_click_through(win32gui.FindWindow(None, self.root.title()))
         self.keep_on_top()
@@ -371,6 +425,15 @@ class OsuOverlay:
         self.listener.start()
 
         # Initialize hotkeys
+        if not self.start_flag and self.root:
+            # Load circle data
+            self.circles_info = self.load_circle_info()
+            self.draw_mods()
+            # Scan for the first hitcircle to appear (pauses code until it appears)
+            scan_for_start(1, self.HR, self.mapdata)
+            # Start the sequence once it's detected
+            self.start_flag = True
+            self.start_sequence()
         keyboard.on_press(self.on_key_press)
-        self.check_interaction()
         self.root.mainloop()
+        self.check_interaction()
